@@ -1,0 +1,173 @@
+
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GPS Position & Lat/Lon Linien</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-wS3+oX2Y0k8/6q3r0Y2b2k6s9k1f8QbZ0+Gm1Vq5e6qQZ1vQf2jvY9l1K0x3Yv2S" crossorigin=""/>
+  <style>
+    html,body,#map { height: 100%; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Roboto, "Segoe UI", Arial; }
+    #controls {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      background: rgba(255,255,255,0.95); padding: 10px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    #coords { margin-top: 6px; font-size: 14px; }
+    label { font-size: 13px; }
+    input[type=number] { width: 80px; }
+    .small { font-size: 12px; color: #444; }
+    #centerCross {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 800; pointer-events: none;
+    }
+    #centerCross:before { content: '+'; font-size: 28px; color: rgba(0,0,0,0.6); }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button id="btnLocate">Position ermitteln</button>
+      <button id="btnFollow">Folgen: Aus</button>
+      <label class="small">Abstand (°): <input id="gridStep" type="number" step="0.01" value="0.1" min="0.001"></label>
+      <button id="btnRedraw">Raster neu zeichnen</button>
+    </div>
+    <div id="coords">Lat: — &nbsp;&nbsp; Lon: — &nbsp;&nbsp; Genauigkeit: —</div>
+    <div class="small">Erlaubnis für Standort erforderlich. Bei mobilen Geräten bitte "Hohe Genauigkeit" aktivieren.</div>
+  </div>
+
+  <div id="map"></div>
+  <div id="centerCross" aria-hidden="true"></div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-+Zt0+vT6h2xZp9+o2k4h1q3f7y7xQ2s9f3k2q1b6s7z8p9c6a1w0m3n4o5p6q7r8" crossorigin=""></script>
+  <script>
+    // Minimal website that reads device GPS and draws lat/lon grid lines on the map.
+
+    const map = L.map('map', { zoomControl: true }).setView([48.1351, 11.5820], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    const marker = L.circleMarker([0,0], { radius: 8, color: '#d00', fillColor: '#f33', fillOpacity: 0.9 }).addTo(map);
+    marker.setStyle({opacity:0}); // hidden until we have a fix
+
+    let follow = false;
+    let watchId = null;
+    let gridLayer = L.layerGroup().addTo(map);
+
+    const coordsEl = document.getElementById('coords');
+    const btnLocate = document.getElementById('btnLocate');
+    const btnFollow = document.getElementById('btnFollow');
+    const gridStepInput = document.getElementById('gridStep');
+    const btnRedraw = document.getElementById('btnRedraw');
+
+    function updateCoordsText(lat, lon, acc) {
+      coordsEl.innerHTML = `Lat: ${lat.toFixed(7)} &nbsp;&nbsp; Lon: ${lon.toFixed(7)} &nbsp;&nbsp; Genauigkeit: ${acc ? acc.toFixed(1) + ' m' : '—'}`;
+    }
+
+    function drawGrid(stepDeg) {
+      // stepDeg in degrees (e.g. 0.1)
+      gridLayer.clearLayers();
+      const bounds = map.getBounds();
+      const south = Math.floor(bounds.getSouth() / stepDeg) * stepDeg - stepDeg;
+      const north = Math.ceil(bounds.getNorth() / stepDeg) * stepDeg + stepDeg;
+      const west = Math.floor(bounds.getWest() / stepDeg) * stepDeg - stepDeg;
+      const east = Math.ceil(bounds.getEast() / stepDeg) * stepDeg + stepDeg;
+
+      // draw latitude lines (horizontal)
+      for (let lat = south; lat <= north; lat = +(lat + stepDeg).toFixed(8)) {
+        const latLine = [[lat, west], [lat, east]];
+        L.polyline(latLine, { color: '#333', weight: 1, opacity: 0.35, dashArray: '4 6' }).addTo(gridLayer);
+        // add label at left
+        L.marker([lat, west + 0.01], { interactive: false, opacity: 0.7, icon: L.divIcon({ className: 'grid-label', html: `<div style="font-size:11px;background:rgba(255,255,255,0.8);padding:2px;border-radius:3px;">${lat.toFixed(4)}°</div>` }) }).addTo(gridLayer);
+      }
+
+      // draw longitude lines (vertical)
+      for (let lon = west; lon <= east; lon = +(lon + stepDeg).toFixed(8)) {
+        const lonLine = [[south, lon], [north, lon]];
+        L.polyline(lonLine, { color: '#333', weight: 1, opacity: 0.35, dashArray: '4 6' }).addTo(gridLayer);
+        L.marker([south + 0.01, lon], { interactive: false, icon: L.divIcon({ className: 'grid-label', html: `<div style="font-size:11px;background:rgba(255,255,255,0.8);padding:2px;border-radius:3px;">${lon.toFixed(4)}°</div>` }) }).addTo(gridLayer);
+      }
+    }
+
+    // initial draw
+    drawGrid(parseFloat(gridStepInput.value));
+
+    // redraw when map moves (but debounce)
+    let drawTimeout = null;
+    map.on('moveend', () => {
+      clearTimeout(drawTimeout);
+      drawTimeout = setTimeout(() => drawGrid(parseFloat(gridStepInput.value)), 150);
+    });
+
+    function onPositionSuccess(pos) {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      const acc = pos.coords.accuracy;
+
+      marker.setLatLng([lat, lon]);
+      marker.setStyle({opacity:1});
+      updateCoordsText(lat, lon, acc);
+
+      // center if following
+      if (follow) map.setView([lat, lon]);
+
+      // optionally draw crosshairs or a small circle for accuracy
+      // update accuracy circle
+      if (!marker._accCircle) {
+        marker._accCircle = L.circle([lat, lon], { radius: acc, color: '#d00', weight: 1, fillOpacity: 0.05 }).addTo(map);
+      } else {
+        marker._accCircle.setLatLng([lat, lon]);
+        marker._accCircle.setRadius(acc);
+      }
+    }
+
+    function onPositionError(err) {
+      alert('Fehler beim Ermitteln der Position: ' + err.message + ' (Code ' + err.code + ')');
+    }
+
+    btnLocate.addEventListener('click', () => {
+      if (!navigator.geolocation) return alert('Geolocation wird von diesem Browser nicht unterstützt.');
+      navigator.geolocation.getCurrentPosition((p) => {
+        onPositionSuccess(p);
+        map.setView([p.coords.latitude, p.coords.longitude], 17);
+      }, onPositionError, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+    });
+
+    btnFollow.addEventListener('click', () => {
+      follow = !follow;
+      btnFollow.textContent = follow ? 'Folgen: Ein' : 'Folgen: Aus';
+
+      if (follow) {
+        if (!navigator.geolocation) return alert('Geolocation wird von diesem Browser nicht unterstützt.');
+        // start watch
+        watchId = navigator.geolocation.watchPosition(onPositionSuccess, onPositionError, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+      } else {
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+    });
+
+    btnRedraw.addEventListener('click', () => drawGrid(parseFloat(gridStepInput.value)));
+
+    // update label while moving mouse over map to show cursor lat/lon
+    map.on('mousemove', (e) => {
+      // small helper: show cursor coords in coordsEl when not following
+      if (!follow) updateCoordsText(e.latlng.lat, e.latlng.lng, null);
+    });
+
+    // try to auto-locate on load
+    window.addEventListener('load', () => {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition((p) => {
+          onPositionSuccess(p);
+          map.setView([p.coords.latitude, p.coords.longitude], 16);
+        }, () => {}, { enableHighAccuracy: true });
+      }
+    });
+  </script>
+</body>
+</html>
